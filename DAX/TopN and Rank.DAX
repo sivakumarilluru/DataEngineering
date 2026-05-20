@@ -1,0 +1,12 @@
+
+// Scenario: Create a leaderboard or "Top N" ranking for products.
+Product Rank = 
+RANKX(ALL(Products[Name]), [Total Sales], , DESC)
+
+
+// Scenario: Calculate the percentage of total sales (ignoring specific filters on the product category).
+% of Total Sales = 
+DIVIDE(
+    [Total Sales], 
+    CALCULATE([Total Sales], ALL(Products))
+)

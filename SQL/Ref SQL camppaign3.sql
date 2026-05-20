@@ -1,0 +1,302 @@
+WITH ORGANIZATIONS AS (
+SELECT ID,NAME,UUID,SUBDOMAIN
+FROM PF_DEV_DB.PUBLIC.ORGANIZATIONS AS OG 
+WHERE UUID ='{{#raw system::CurrentUserAttributeText::app_id}}'
+),
+--PD-33632
+include_folder_filter AS (
+  SELECT TRIM(VALUE::STRING) AS folder_id
+  FROM TABLE(SPLIT_TO_TABLE(ARRAY_TO_STRING(ARRAY_CONSTRUCT{{include_folder}}, ','),','))
+  where folder_id!= ''
+)
+,exclude_folder_filter AS (
+  SELECT TRIM(VALUE::STRING) AS folder_id
+  FROM TABLE(SPLIT_TO_TABLE(ARRAY_TO_STRING(ARRAY_CONSTRUCT{{exclude_folder}}, ','),','))
+  where folder_id!= ''
+),
+GET_PARENT_ID AS (
+SELECT
+       F.ID,ORGANIZATION_ID,ENTITY_TYPE
+FROM PF_DEV_DB.PUBLIC.FOLDERS AS F
+INNER JOIN ORGANIZATIONS AS OG ON F.ORGANIZATION_ID=OG.ID 
+WHERE ENTITY_TYPE=5
+AND is_root=true
+),
+QUERY_CTE AS (
+SELECT
+       F.ID,
+       CASE WHEN PARENT_ID IS NULL THEN CASE
+            WHEN is_root = true THEN 0 ELSE GP.ID END ELSE PARENT_ID END AS PARENT_ID,
+       FOLDER_NAME
+FROM PF_DEV_DB.PUBLIC.FOLDERS AS F
+INNER JOIN ORGANIZATIONS AS OG ON F.ORGANIZATION_ID=OG.ID
+LEFT JOIN GET_PARENT_ID AS GP ON F.ORGANIZATION_ID=GP.ORGANIZATION_ID AND GP.ENTITY_TYPE=F.ENTITY_TYPE 
+WHERE F.ENTITY_TYPE=5
+),
+MAIN_CTE AS (
+SELECT
+   ID,
+   PARENT_ID,
+   FOLDER_NAME,
+   SUBSTR (SYS_CONNECT_BY_PATH (FOLDER_NAME, ' / '), 3) AS FOLDER_STRUCTURE
+FROM QUERY_CTE START WITH PARENT_ID='0' CONNECT BY PRIOR id = PARENT_ID
+),
+FOLDER_CTE AS (
+SELECT 
+      DISTINCT B.EXPERIENCE_ID, A.FOLDER_NAME,A.FOLDER_STRUCTURE 
+FROM MAIN_CTE AS A 
+INNER JOIN PF_DEV_DB.PUBLIC.FOLDER_EXPERIENCES AS B ON A.ID=B.FOLDER_ID
+),
+PAGE_VIEW_CTE AS (
+SELECT 
+      PG.APP_ID,
+      PG.SESSION_ID,
+      PG.UNIFIED_EXPERIENCE_UUID,
+      PG.CAMPAIGN_TOOLS_EXPERIENCE_UUID,
+      PG.PAGE_VIEW_ID,
+      PG.EXPERIENCE_TYPE,
+      PG.DURATION,
+      PG.UNIFIED_ENGAGEMENT_SCORE,
+      PG.START_TIME_UTC,
+      PG.SPIDER_OR_ROBOT,
+      PG.IP_2_PROXY_ISPROXY,
+      PG.CAMPAIGN_TOOLS_CONTENT_UUID,
+      COALESCE(PG.QUERY_STRING,'Undefined') AS QUERY_STRING,
+      CASE WHEN LEN(PG.GEO_COUNTRY)<2 THEN 'Undefined' ELSE (COALESCE(PG.GEO_COUNTRY,'Undefined')) END AS COUNTRY,
+      COALESCE(PG.UNIFIED_EXPERIENCE_UUID,'Undefined') AS PG_UNIFIED_EXP_UUID,
+      COALESCE(PG.UTM_CAMPAIGN,'Undefined') AS UTM_CAMPAIGN,
+      COALESCE(PG.UTM_CONTENT,'Undefined') AS UTM_CONTENT,
+      COALESCE(PG.UTM_MEDIUM,'Undefined') AS UTM_MEDIUM,
+      COALESCE(PG.UTM_SOURCE,'Undefined') AS UTM_SOURCE,
+      COALESCE(PG.UTM_TERM,'Undefined') AS UTM_TERM,
+      pg.segment_group_id,
+      PG.CONTENT_GROUP,
+      PG.EXPERIENCE_ID,
+      PG.VISITOR_ID,
+      PG.LANDING_PAGE_CONTENT_UUID,
+      EXP.NAME,
+      COALESCE(COL.NAME, 'Undefined') AS COLLECTION_NAME,
+      COALESCE(COL.TYPE, 'Undefined') AS COLLECTION_TYPE,
+      SPLIT_PART(SPLIT_PART(PAGE_URLPATH, '/rec/', 2), '/', 1) AS REC_ID
+             
+FROM PF_DEV_DB.PUBLIC.PAGE_VIEWS_UNIFIED AS PG
+INNER JOIN ORGANIZATIONS AS OG ON OG.UUID=PG.APP_ID
+INNER JOIN PF_DEV_DB.PUBLIC.EXPERIENCES AS EXP ON EXP.ORGANIZATION_ID = OG.ID AND PG.UNIFIED_EXPERIENCE_UUID=EXP.UUID  --PD-22278 -19-11-2024
+LEFT JOIN PF_DEV_DB.PUBLIC.TEMPLATED_EXPERIENCES TE ON TE.EXPERIENCE_ID=EXP.ID
+LEFT JOIN PF_DEV_DB.PUBLIC.EXPERIENCE_COLLECTIONS EC ON EXP.ORGANIZATION_ID = EC.ORGANIZATION_ID AND EXP.UUID = EC.EXPERIENCE_UUID AND PG.COLLECTION_UUID = EC.COLLECTION_UUID
+LEFT JOIN PF_DEV_DB.PUBLIC.PF_COLLECTIONS COL ON EC.COLLECTION_UUID = COL.COLLECTION_UUID
+WHERE PG.EXPERIENCE_TYPE=5 AND TE.EXPERIENCE_TYPE='templated_experience' AND LEN(REC_ID)<2
+AND PG.START_TIME_UTC >= dateadd(year,-2,current_date()) 
+AND (CASE  WHEN date({{visit_date}}:start) IS NULL THEN
+                      date(PG.start_time_utc)  >= DATEADD(year, -2, date({{visit_date}}:end)) and date(PG.start_time_utc) <= date({{visit_date}}:end)
+           WHEN date({{visit_date}}:end) IS NULL THEN date(PG.start_time_utc) >= date({{visit_date}}:start)  
+           WHEN date({{visit_date}}:start) = date({{visit_date}}:end) THEN date(PG.start_time_utc) = date({{visit_date}}:start)
+           ELSE date(PG.start_time_utc) BETWEEN date({{visit_date}}:start) AND date({{visit_date}}:end)end)
+AND PG.EXPERIENCE_ID IN (SELECT DISTINCT EXPERIENCE_ID
+    FROM PF_DEV_DB.PUBLIC.FOLDER_EXPERIENCES AS F
+    INNER JOIN ORGANIZATIONS OG ON F.ORGANIZATION_ID=OG.ID      
+    WHERE  (
+        length(ARRAY_TO_STRING(ARRAY_CONSTRUCT{{include_folder}}, ',')) = 0 OR 
+        (PARENT_FOLDER_ID IN (SELECT folder_id FROM include_folder_filter))
+      )
+    ) 
+                    
+AND PG.EXPERIENCE_ID NOT IN (SELECT DISTINCT EXPERIENCE_ID
+    FROM PF_DEV_DB.PUBLIC.FOLDER_EXPERIENCES AS F 
+    INNER JOIN ORGANIZATIONS OG ON F.ORGANIZATION_ID=OG.ID
+    WHERE  CASE WHEN length(ARRAY_TO_STRING(ARRAY_CONSTRUCT{{exclude_folder}}, ',')) = 0 THEN FALSE 
+      ELSE PARENT_FOLDER_ID IN (SELECT folder_id FROM exclude_folder_filter)
+      end
+    )           
+),
+
+EVENTS_ACTION_SUMMARY_UNIFIED_CTE as (
+  select COALESCE(EA.UNIFIED_EXPERIENCE_UUID,'Undefined') AS EA_UNIFIED_EXP_UUID,
+      EA.FORM_SHOWN,
+      EA.FORM_FILLS,
+      EA.DOWNLOADS,
+      EA.SESSION_ID,
+      EA.PAGE_VIEW_ID,
+      EA.APP_ID
+  from PF_DEV_DB.PUBLIC.EVENTS_ACTION_SUMMARY_UNIFIED EA
+  where APP_ID='{{#raw system::CurrentUserAttributeText::app_id}}'
+)
+
+,CT_CONTENTS_CTE AS
+( 
+  SELECT CT.INTERNAL_TITLE,
+   CT.CONTENT_GROUP,
+   CT.ORGANIZATION_ID,
+   CT.CONTENT_UUID,
+   CT.ID          
+  FROM PF_DEV_DB.PUBLIC.CT_CONTENTS CT
+  WHERE CT.organization_id = '{{#raw system::CurrentUserAttributeText::organization_id}}'
+)
+
+,VISITOR_CTE AS (
+SELECT 
+      APP_ID,
+      VISITOR_UUID,
+      IDENTITY,
+      EMAIL,
+      EMAIL_DOMAIN,
+      EMAIL_DOMAIN_ACCOUNT,
+      ACCOUNT_DOMAIN,
+      KNOWN_FROM,
+            IS_BOT,
+      CASE WHEN IS_KNOWN=TRUE THEN 'Known' ELSE 'Unknown' END AS TYPE,
+      FIRST_VISIT_TIME_UTC,
+      MIN(KNOWN_FROM) OVER (PARTITION BY APP_ID,IDENTITY) AS MIN_KNOWN_FROM,
+      MIN(FIRST_VISIT_TIME_UTC) OVER (PARTITION BY APP_ID,IDENTITY) AS VISITOR_FIRST_VISIT_TIME,
+      MAX(LAST_VISIT_TIME_UTC) OVER (PARTITION BY APP_ID,IDENTITY) AS VISITOR_LAST_VISIT_TIME  /*PD22121 - 29-10-2024*/
+
+FROM PF_DEV_DB.PUBLIC.VISITOR_UNIFIED
+WHERE APP_ID='{{#raw system::CurrentUserAttributeText::app_id}}'
+),
+
+ACCOUNTS_CTE AS (
+SELECT
+      APP_ID,
+      ACCOUNT_NAME,
+      DOMAIN_NAME,
+      CREATED_AT,
+      INDUSTRY,
+      -- MIN(COALESCE(CREATED_AT,FIRST_VISIT_TIME_UTC)) OVER (PARTITION BY APP_ID,ACCOUNT_NAME,DOMAIN_NAME) AS MIN_CREATED_AT,
+      UNIFIED_FIRST_VISIT_TIME_UTC AS FIRST_VISIT_TIME_UTC,
+      -- MIN(COALESCE(CREATED_AT,FIRST_VISIT_TIME_UTC)) OVER (PARTITION BY APP_ID,ACCOUNT_NAME,DOMAIN_NAME) AS AC_FIRST_VISIT_TIME,
+      UNIFIED_FIRST_VISIT_TIME_UTC as MIN_CREATED_AT ,--PD-32067
+      UNIFIED_FIRST_VISIT_TIME_UTC as AC_FIRST_VISIT_TIME, --PD-32067
+      MAX(LAST_VISIT_TIME_UTC) OVER (PARTITION BY APP_ID,ACCOUNT_NAME,DOMAIN_NAME) AS AC_LAST_VISIT_TIME
+      
+FROM PF_DEV_DB.PUBLIC.ORG_ACCOUNTS_UNQIUE_DOMAIN
+WHERE APP_ID='{{#raw system::CurrentUserAttributeText::app_id}}'
+),
+flattened_assets AS (
+    SELECT
+        content_uuid,
+        ORGANIZATION_ID,
+        read_time_seconds,
+        content_type,
+case when f.value:asset_content:duration_seconds is not null
+  and f.value:asset_content:duration_seconds != 'null' then f.value:asset_content:duration_seconds else null end AS duration_seconds,
+      case when f.value:asset_content:duration_sec  is not null
+  and f.value:asset_content:duration_sec  != 'null' then f.value:asset_content:duration_sec  else null end AS duration_sec
+    FROM PF_DEV_DB.PUBLIC.CONTENTS ,
+    LATERAL FLATTEN(input => asset_objects) AS f
+    where ORGANIZATION_ID = '{{#raw system::CurrentUserAttributeText::app_id}}'
+),
+flattened_assets_grouped as (select
+        ORGANIZATION_ID,
+         content_uuid,
+        max(read_time_seconds) as read_time_seconds ,
+        max(content_type) as content_type,
+        sum(duration_seconds) as duration_seconds,
+        sum(duration_sec) as duration_sec
+        from flattened_assets group by 1, 2 )
+        
+
+        
+SELECT
+      PG.APP_ID,
+      PG.NAME AS EXPERIENCE_NAME,
+      PG.SESSION_ID,
+      PG.UNIFIED_EXPERIENCE_UUID,
+      CONCAT(PG.SESSION_ID,PG.UNIFIED_EXPERIENCE_UUID) AS SESSIONS,
+      PG.CAMPAIGN_TOOLS_EXPERIENCE_UUID,
+      PG.PAGE_VIEW_ID,
+      PG.EXPERIENCE_TYPE,
+      PG.DURATION,
+      PG.UNIFIED_ENGAGEMENT_SCORE,
+      PG.START_TIME_UTC,
+      PG.SPIDER_OR_ROBOT,
+      PG.IP_2_PROXY_ISPROXY,
+      PG.CAMPAIGN_TOOLS_CONTENT_UUID,
+      COALESCE(PG.QUERY_STRING,'Undefined') AS QUERY_STRING,
+      PG.COUNTRY,
+      CT.CONTENT_GROUP,
+    /*  CASE WHEN VU.MIN_KNOWN_FROM IS NOT NULL AND (CASE WHEN date({{visit_date}}:end) IS NULL THEN
+                         (date(VU.MIN_KNOWN_FROM)) <= current_timestamp()
+                        ELSE  date(VU.MIN_KNOWN_FROM) <= date({{visit_date}}:end)END) THEN 'Known' ELSE 'Unknown' END AS TYPE,*/
+                        VU.TYPE,
+      (CASE WHEN (CASE WHEN date({{visit_date}}:start) IS NULL THEN
+                         ((date(VU.VISITOR_FIRST_VISIT_TIME) >= DATEADD(year, -2, date({{visit_date}}:end)) and date(VU.VISITOR_FIRST_VISIT_TIME) <= date({{visit_date}}:end) )  or VU.VISITOR_FIRST_VISIT_TIME is null)
+                       WHEN date({{visit_date}}:end) IS NULL THEN
+                         (date(VU.VISITOR_FIRST_VISIT_TIME) >= date({{visit_date}}:start) or VU.VISITOR_FIRST_VISIT_TIME IS NULL)
+                       WHEN date({{visit_date}}:start) = date({{visit_date}}:end) THEN
+                        (date(VU.VISITOR_FIRST_VISIT_TIME) = date({{visit_date}}:start) or VU.VISITOR_FIRST_VISIT_TIME IS NULL)
+                       ELSE (date(VU.VISITOR_FIRST_VISIT_TIME) BETWEEN date({{visit_date}}:start) AND date({{visit_date}}:end)  or VU.VISITOR_FIRST_VISIT_TIME IS NULL)
+                          END) THEN 'New' ELSE 'Returning' END) AS VISITOR_TYPE,
+                          
+      (CASE WHEN (CASE WHEN date({{visit_date}}:start) IS NULL THEN
+                         ((date(A.MIN_CREATED_AT) >= DATEADD(year, -2, date({{visit_date}}:end))  and date(A.MIN_CREATED_AT) <= date({{visit_date}}:end) ) or A.MIN_CREATED_AT is null)
+                    WHEN date({{visit_date}}:end) IS NULL THEN
+                         (date(A.MIN_CREATED_AT) >= date({{visit_date}}:start) or A.MIN_CREATED_AT is null)
+                       WHEN date({{visit_date}}:start) = date({{visit_date}}:end) THEN
+                        (date(A.MIN_CREATED_AT) = date({{visit_date}}:start) or A.MIN_CREATED_AT is null)
+                    ELSE  (date(A.MIN_CREATED_AT) BETWEEN date({{visit_date}}:start) AND date({{visit_date}}:end)  or A.MIN_CREATED_AT is null)
+                          END ) then 'New' else 'Returning' end) as account_type,
+                          
+      CASE WHEN VU.TYPE = 'Known' THEN VU.EMAIL ELSE VU.IDENTITY END AS IDENTITY,
+      
+      COALESCE(TO_CHAR(VU.VISITOR_FIRST_VISIT_TIME, 'DD Mon YYYY'), 'NA') AS VISITOR_FIRST_VISIT_TIME,
+      COALESCE(TO_CHAR(VU.VISITOR_LAST_VISIT_TIME, 'DD Mon YYYY'), 'NA') AS VISITOR_LAST_VISIT_TIME,      
+COALESCE(VU.EMAIL_DOMAIN_ACCOUNT,VU.ACCOUNT_DOMAIN) AS VISITOR_ACCOUNT_DOMAIN,
+      CONCAT(COALESCE(A.ACCOUNT_NAME,VU.EMAIL_DOMAIN_ACCOUNT,'Undefined'),' ','(',COALESCE(A.DOMAIN_NAME,'Undefined'),')') AS ACCOUNT_NAME, --PD-23292 -05-12-2024
+      A.DOMAIN_NAME,
+      A.MIN_CREATED_AT,
+      A.AC_FIRST_VISIT_TIME,
+      A.AC_LAST_VISIT_TIME,
+      (CASE WHEN A.INDUSTRY IS NULL OR LEN(A.INDUSTRY) <= 1 THEN 'Undefined' ELSE A.INDUSTRY END) AS INDUSTRY,
+      PG.PG_UNIFIED_EXP_UUID,
+      EA.EA_UNIFIED_EXP_UUID,
+      EA.FORM_SHOWN,
+      EA.FORM_FILLS,
+      EA.DOWNLOADS,
+    --  CASE WHEN ((PG.SPIDER_OR_ROBOT IS NULL) OR (PG.SPIDER_OR_ROBOT=FALSE)) AND PG.IP_2_PROXY_ISPROXY='no' THEN TRUE ELSE FALSE END AS BOT_TOGGLE,
+    CASE WHEN (VU.IS_BOT IS NULL) OR (VU.IS_BOT=FALSE) THEN TRUE ELSE FALSE END AS BOT_TOGGLE,
+      CASE WHEN VX.VISITOR_UUID IS NULL THEN TRUE ELSE NULL END AS VISITOR_EXCLUSION,
+      CASE WHEN {{exclude_zero_duration}} = TRUE THEN PG.DURATION > 0  ELSE PG.DURATION >= 0 END AS EXCLUDE_0_DURATION,
+      COALESCE(ET.ENGAGEMENT_THRESHOLD,ET.DEFAULT_ENGAGEMENT_THRESHOLD) AS CONTENT_THRESHOLD,
+      -- CTC.INTERNAL_TITLE AS LP_TITLE,---Landing_page_filter ---pd30694
+      -- coalesce(CTC.INTERNAL_TITLE,CT.INTERNAL_TITLE) AS LP_TITLE,
+      coalesce(CTC.INTERNAL_TITLE,case when CT.CONTENT_GROUP='landing_page' then CT.INTERNAL_TITLE end) AS LP_TITLE,
+      CT.INTERNAL_TITLE,
+      CASE WHEN CT.CONTENT_GROUP='landing_page' THEN CONCAT(CT.INTERNAL_TITLE,'(LP)') ELSE CT.INTERNAL_TITLE END AS INTERNAL_TITLE_LP,
+      CASE WHEN CT.CONTENT_GROUP ='landing_page' THEN CT.INTERNAL_TITLE ELSE null END AS LANDING_PAGE,
+      CASE WHEN CT.CONTENT_GROUP !='landing_page' THEN COALESCE(CT.INTERNAL_TITLE,'Undefined') END AS CONTENT_TITLE_FILTER, --- CONTENT_TITLE_FILTER
+      VU.KNOWN_FROM,
+      COALESCE(TO_CHAR(VU.KNOWN_FROM , 'DD Mon YYYY'),'NA') AS CONVERSION_DATE,
+      CASE WHEN DURATION>CONTENT_THRESHOLD THEN 'Yes' ELSE 'No' END AS MET_THRESHOLD,
+      COALESCE(PG.UTM_CAMPAIGN,'Undefined') AS UTM_CAMPAIGN,
+      COALESCE(PG.UTM_CONTENT,'Undefined') AS UTM_CONTENT,
+      COALESCE(PG.UTM_MEDIUM,'Undefined') AS UTM_MEDIUM,
+      COALESCE(PG.UTM_SOURCE,'Undefined') AS UTM_SOURCE,
+      COALESCE(PG.UTM_TERM,'Undefined') AS UTM_TERM,
+      ROW_NUMBER() OVER (PARTITION BY SESSIONS ORDER BY START_TIME_UTC ASC) AS SESSION_INDEX,
+      FC.FOLDER_STRUCTURE,
+      PG.COLLECTION_NAME,
+      PG.COLLECTION_TYPE,
+    sg.name as segment_name,
+      OG.SUBDOMAIN,CT.CONTENT_UUID,
+      '{{#raw system::CurrentUserAttributeText::default_tld}}' AS DEFAULT_TLD,
+      CC.read_time_seconds,
+    CC.content_type,
+    coalesce(CC.duration_seconds, CC.duration_sec) as duration_seconds
+    
+
+FROM PAGE_VIEW_CTE AS PG
+INNER JOIN ORGANIZATIONS AS OG ON OG.UUID=PG.APP_ID
+LEFT JOIN VISITOR_CTE AS VU ON VU.VISITOR_UUID=PG.VISITOR_ID AND VU.APP_ID=PG.APP_ID
+LEFT JOIN ACCOUNTS_CTE A ON A.APP_ID=VU.APP_ID AND VISITOR_ACCOUNT_DOMAIN=A.DOMAIN_NAME
+LEFT JOIN EVENTS_ACTION_SUMMARY_UNIFIED_CTE EA ON EA.APP_ID=PG.APP_ID AND EA.SESSION_ID=PG.SESSION_ID
+          AND PG_UNIFIED_EXP_UUID=EA_UNIFIED_EXP_UUID AND PG.PAGE_VIEW_ID=EA.PAGE_VIEW_ID
+LEFT JOIN CT_CONTENTS_CTE CT ON PG.CAMPAIGN_TOOLS_CONTENT_UUID=CT.CONTENT_UUID AND OG.ID=CT.ORGANIZATION_ID
+LEFT JOIN CT_CONTENTS_CTE CTC ON PG.LANDING_PAGE_CONTENT_UUID=CTC.CONTENT_UUID AND OG.ID=CTC.ORGANIZATION_ID
+-- LEFT JOIN PF_DEV_DB.PUBLIC.CT_CONTENTS CTC ON OG.ID = CTC.ORGANIZATION_ID AND CASE WHEN PG.CONTENT_GROUP = 'landing_page' 
+--      THEN PG.CAMPAIGN_TOOLS_CONTENT_UUID = CTC.CONTENT_UUID ELSE PG.landing_page_content_uuid = CTC.CONTENT_UUID END
+LEFT JOIN PF_DEV_DB.PUBLIC.CONTENTS_ET_SCORE AS ET ON OG.ID=ET.ORGANIZATION_ID AND ET.CONTENT_UUID=PG.CAMPAIGN_TOOLS_CONTENT_UUID
+LEFT JOIN FOLDER_CTE AS FC ON PG.EXPERIENCE_ID=FC.EXPERIENCE_ID
+LEFT JOIN PF_DEV_DB.PUBLIC.VISITOR_EXCLUSION VX ON VX.APP_ID=PG.APP_ID and VX.VISITOR_UUID=PG.VISITOR_ID
+LEFT JOIN PF_DEV_DB.PUBLIC.SEGMENT_GROUPS_ALL sg ON pg.segment_group_id = sg.id::varchar and og.id = sg.organization_id 
+left join  flattened_assets_grouped CC on CC.ORGANIZATION_ID=og.uuid and ct.content_uuid = CC.content_uuid /*--PD-31026 04-08-2025—*/
+

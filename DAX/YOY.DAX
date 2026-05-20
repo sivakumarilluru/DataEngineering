@@ -1,0 +1,30 @@
+// Scenario: Compare current sales to the same period in the previous year.
+PY Sales = 
+CALCULATE(
+    [Total Sales], 
+    SAMEPERIODLASTYEAR('Date'[Date])
+)
+
+// Scenario: Calculate Year-to-Date (YTD) totals for cumulative progress tracking.
+YTD Sales = 
+TOTALYTD([Total Sales], 'Date'[Date])
+
+// Scenario: Calculate total profit by subtracting cost from sales at the individual row level before summing.
+Total Profit =
+SUMX(
+    Sales,
+    Sales[Amount]
+        - (Sales[Amount] * Sales[Discount])
+        - Sales[Cost]
+)
+
+// Example for one row:
+
+// Amount = 1000
+// Discount = 0.10
+// Cost = 700
+
+// Calculation:
+
+// Discount Amount = 1000 × 0.10 = 100
+// Profit = 1000 − 100 − 700 = 200

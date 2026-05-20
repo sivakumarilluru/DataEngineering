@@ -1,0 +1,42 @@
+//Measure 1: Top 3 Sales Amount
+
+Top 3 Sales = 
+CALCULATE(
+    [Total Sales],
+    TOPN(
+        3, 
+        VALUES(SalesData[Product]), 
+        [Total Sales], 
+        DESC
+    )
+)
+
+//Measure 2: Top 3 Products Formatted List
+
+Top 3 Products List = 
+VAR Top3Table = 
+    TOPN(
+        3, 
+        VALUES(SalesData[Product]), 
+        [Total Sales], 
+        DESC
+    )
+VAR ConcatString = 
+    CONCATENATEX(
+        Top3Table, 
+        SalesData[Product], 
+        "," & UNICHAR(10), -- The comma and line feed delimiter
+        [Total Sales], 
+        DESC
+    )
+RETURN 
+    ConcatString & "." -- Appending the final period
+
+//Measure 3: Contribution %
+
+Contribution of Top 3 % = 
+DIVIDE(
+    [Top 3 Sales], 
+    [Total Sales], 
+    0
+)
