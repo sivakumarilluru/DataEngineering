@@ -87,3 +87,29 @@ LEFT JOIN DimCustomer_SCD2 D
     AND D.CurrentFlag = 1
 WHERE D.CustomerID IS NULL   -- new customer
    OR (D.Name <> S.Name OR D.City <> S.City);  -- changed customer
+
+=======================================================================================================
+
+CREATE PROCEDURE USP_SCD2_LoadCustomer
+AS
+BEGIN
+    -- Step 1: Expire old rows
+    UPDATE D
+    SET EndDate = GETDATE(), CurrentFlag = 0
+    FROM DimCustomer_SCD2 D
+    INNER JOIN StgCustomer S ON D.CustomerID = S.CustomerID
+    WHERE D.CurrentFlag = 1 AND (D.Name <> S.Name OR D.City <> S.City);
+
+    -- Step 2: Insert new versions
+    INSERT INTO DimCustomer_SCD2 (CustomerID, Name, City, StartDate, EndDate, CurrentFlag)
+    SELECT S.CustomerID, S.Name, S.City, GETDATE(), NULL, 1
+    FROM StgCustomer S
+    LEFT JOIN DimCustomer_SCD2 D ON S.CustomerID = D.CustomerID AND D.CurrentFlag = 1
+    WHERE D.CustomerID IS NULL OR (D.Name <> S.Name OR D.City <> S.City);
+
+    -- Step 3: Truncate staging (optional, for next load)
+    TRUNCATE TABLE StgCustomer;
+END;
+
+
+=====================================================================================================
