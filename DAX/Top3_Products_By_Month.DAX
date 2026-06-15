@@ -1,0 +1,49 @@
+// Top 3 products per month - two variants
+// Replace 'Product'[ProductName] and 'Sales'[SalesAmount] with your model's table/column names.
+
+// 1) Comma-separated list (use this in a table with Month on rows)
+Top 3 Products (Comma) =
+VAR TopNTable =
+    TOPN(
+        3,
+        ADDCOLUMNS(
+            VALUES('Product'[ProductName]),
+            "ProductSales", CALCULATE(SUM('Sales'[SalesAmount]))
+        ),
+        [ProductSales],
+        DESC
+    )
+RETURN
+CONCATENATEX(
+    TopNTable,
+    'Product'[ProductName],
+    ", ",
+    [ProductSales],
+    DESC
+)
+
+// 2) New-line separated list (each product on its own line)
+Top 3 Products (NewLine) =
+VAR TopNTable =
+    TOPN(
+        3,
+        ADDCOLUMNS(
+            VALUES('Product'[ProductName]),
+            "ProductSales", CALCULATE(SUM('Sales'[SalesAmount]))
+        ),
+        [ProductSales],
+        DESC
+    )
+RETURN
+CONCATENATEX(
+    TopNTable,
+    'Product'[ProductName],
+    UNICHAR(10),
+    [ProductSales],
+    DESC
+)
+
+// Notes:
+// - Place `Month`/`Date` on rows in a table visual; these measures show top 3 products for that month.
+// - If your product or sales tables have different names/columns, replace them accordingly.
+// - For export/CSV, the comma-separated variant is easiest; for readable tooltips or cards use the newline variant.
