@@ -204,3 +204,28 @@ FROM sales_transactions
 WHERE YEAR(purchase_date) = 2026
 GROUP BY customer_id
 HAVING COUNT(DISTINCT MONTH(purchase_date)) = 12;
+--Trick: COUNT(DISTINCT MONTH(...)) = 12 ensures customer purchased in all 12 months.
+--I NEED ONLY WHO ARE HAVING SKILLS SET PYTON AND SQL ONLY.
+
+WITH cte AS
+(
+    SELECT
+        student_id,
+        COUNT(*) AS total_skills,
+        SUM(
+            CASE
+                WHEN skill IN ('python', 'sql')
+                THEN 1
+                ELSE 0
+            END
+        ) AS sp_skills
+    FROM students
+    GROUP BY student_id
+)
+SELECT *
+FROM cte
+WHERE total_skills = 2
+  AND sp_skills = 2;
+
+
+
