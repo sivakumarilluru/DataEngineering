@@ -22,8 +22,9 @@ WHERE purchase_month = DATEADD(month, 1, prev_month);
 -- consecutive pattern approach. Always normalize dates 
 -- first with DATE_TRUNC or FORMAT(date,'yyyy-MM') before comparing.
 
-2. Find the Second Highest Salary/Transaction (without TOP/LIMIT tricks)
-sqlSELECT MAX(salary) AS second_highest
+-- 2. Find the Second Highest Salary/Transaction (without TOP/LIMIT tricks)
+-- sql
+    SELECT MAX(salary) AS second_highest
 FROM employees
 WHERE salary < (SELECT MAX(salary) FROM employees);
 
@@ -86,10 +87,10 @@ HAVING MAX(t.purchase_date) < DATEADD(DAY, -90, GETDATE()) OR MAX(t.purchase_dat
 6. Month-over-Month Growth (Sales)
 sqlWITH monthly_sales AS (
     SELECT 
-        DATE_TRUNC('month', sale_date) AS month,
+        FORMATE(sale_date, 'YYYY-MM-01') AS month,
         SUM(amount) AS total_sales
     FROM sales
-    GROUP BY DATE_TRUNC('month', sale_date)
+    GROUP BY FORMATE(sale_date, 'YYYY-MM-01')
 )
 SELECT 
     month,
